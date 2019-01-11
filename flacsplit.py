@@ -268,11 +268,38 @@ if __name__ == '__main__':
         dest="tracks",
         help="List of tracks to work on, default all; example "+
         "'1-3,5,7-10'", default=None)
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument(
+        "-x", "--from-stdin", action="store_true", dest="fromstdin",
+        help="Read list of filenames from stdin, one per line")
+    inputs.add_argument(
+        "-0", "--null", action="store_true", dest="null",
+        help="Read list of filenames from stdin, each terminated by "
+        "a null character.  The GNU find -print0 option produces input "
+        "suitable for this mode.")
+
     parser.add_argument('filenames', metavar='filename.flac', type=str,
-                        nargs='+', help="file to process")
+                        nargs='*', help="file to process")
 
     args = parser.parse_args()
-    if len(args.filenames) < 1:
+
+    if (args.fromstdin or args.null) and args.filenames:
+        parser.error("You can't specify filenames on the command line and "
+                     "also read them from stdin")
+        sys.exit(1)
+
+    if args.fromstdin:
+        filesource = sys.stdin.read()
+        filenames = filesource.split('\n')
+    elif args.null:
+        filesource = sys.stdin.read()
+        filenames = filesource.split('\0')
+    else:
+        filenames = args.filenames
+
+    filenames = [ x for x in filenames if x ]
+
+    if len(filenames) < 1:
         parser.error("please supply at least one input filename")
 
     if args.tracks is None:
@@ -291,7 +318,7 @@ if __name__ == '__main__':
         except:
             parser.error("invalid track list supplied")
 
-    for i in args.filenames:
+    for i in filenames:
         process_file(i, tracks)
 
     if len(errorlog) > 0:
