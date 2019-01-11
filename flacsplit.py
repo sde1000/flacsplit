@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-# Requires python 3.6 for the "encoding" parameter for Popen
+# Requires python 3.6 for the "encoding" parameter for Popen and for
+# os.path.commonpath to accept a sequence of path-like objects
 
 """Split a flac file with cuesheet and embedded tags into multiple
 files, optionally re-encoded as mp3.
@@ -14,6 +15,7 @@ import subprocess
 import re
 import sys
 import argparse
+import pathlib
 
 errorlog = []
 
@@ -26,7 +28,7 @@ def report_error(message):
 
 class flactags:
     def __init__(self, filename):
-        mf = subprocess.Popen(["metaflac", "--export-tags-to=-", filename],
+        mf = subprocess.Popen(["metaflac", "--export-tags-to=-", str(filename)],
                               stdout=subprocess.PIPE, encoding="utf-8")
         tags, xxx = mf.communicate()
         if mf.returncode != 0:
@@ -72,7 +74,7 @@ class cuesheet:
 
     """
     def __init__(self, filename):
-        mf = subprocess.Popen(["metaflac","--export-cuesheet-to=-", filename],
+        mf = subprocess.Popen(["metaflac","--export-cuesheet-to=-", str(filename)],
                               stdout=subprocess.PIPE, encoding="utf-8")
         cues, xxx = mf.communicate()
         if mf.returncode != 0:
@@ -112,11 +114,11 @@ def output_track(filename, destfile, tracknum, tags):
         ["flac", "--decode",
          "--totally-silent",
          "--cue=%d.1-%d.1" % (tracknum, tracknum + 1),
-         "--output-name=-", filename],
+         "--output-name=-", str(filename)],
         stdout=subprocess.PIPE)
     lame = subprocess.Popen(
         ["lame", "--preset", args.lamepreset, "--silent"] + id3opts + [
-        "-", destfile],
+            "-", str(destfile)],
         stdin=flac.stdout)
     try:
         lame.communicate()
@@ -144,12 +146,12 @@ def fatsafe(name):
         name = name.replace(i, '')
     return name
 
-def process_file(inputfile, tracks):
-    basename = os.path.basename(inputfile)
-    if basename[-5:] == '.flac':
-        basename = basename[:-5]
+def process_file(inputfile, tracks, inputbase):
+    if inputfile.suffix != '.flac':
+        report_error("input file '%s' is not a .flac file" % inputfile)
+        return
     try:
-        input_mtime = os.stat(inputfile).st_mtime
+        input_mtime = inputfile.stat().st_mtime
     except:
         report_error("could not stat input file '%s'" % inputfile)
         return
@@ -178,7 +180,7 @@ def process_file(inputfile, tracks):
             else:
                 if not checktags(t.tracks[x]):
                     badtracks.append(x)
-                    report_error("track %d is missing required tags " +
+                    report_error("track %d is missing required tags "
                                  "in file '%s'" % (x, inputfile))
         tracks = [x for x in tracks if x not in badtracks]
 
@@ -190,49 +192,47 @@ def process_file(inputfile, tracks):
     for i in tracks:
         outdir = args.outputdir
         if args.keepdirs:
-            outdir = outdir + os.sep + os.path.dirname(inputfile)
+            relative = inputfile.relative_to(inputbase) if inputbase \
+                       else inputfile
+            outdir = outdir.joinpath(relative.parent)
         if args.subdir and c.lasttrack != 1:
-            outdir = outdir + os.sep + basename
-        if args.verbose:
-            print("Working on %s track %d..." % (inputfile, i))
+            outdir = outdir / inputfile.stem
         if args.fatsafe:
             outdir = fatsafe(outdir)
+        if args.verbose:
+            print("Working on %s track %d..." % (inputfile, i))
         if args.keepdirs or args.subdir:
-            try:
-                os.makedirs(outdir)
-            except OSError:
-                pass # probably already exists; os.makedirs() is not
-                     # the same as mkdir -p
+            outdir.mkdir(parents=True, exist_ok=True)
         if c.lasttrack != 1:
             outfilename = "%02d %s (%s).mp3" % (
                 i, t.tracks[i]['TITLE'], t.tracks[i]['ARTIST'])
         else:
-            outfilename = basename + ".mp3"
+            outfilename = inputfile.stem + ".mp3"
         outfilename = outfilename.replace(os.sep, '')
         if args.fatsafe:
             outfilename = fatsafe(outfilename)
-        outputname = outdir + os.sep + outfilename
+        outputfile = outdir / outfilename
         try:
-            output_mtime = os.stat(outputname).st_mtime
+            output_mtime = outputfile.stat().st_mtime
         except:
             output_mtime = 0
         if args.update:
             if output_mtime > input_mtime:
                 if args.verbose:
-                    print("  - skipping %s because it is newer" % outputname)
+                    print("  - skipping %s because it is newer" % outputfile)
                 continue
         if args.verbose:
-            print("  - writing to %s" % outputname)
-        output_track(inputfile, outputname, i, t.tracks[i])
+            print("  - writing to %s" % outputfile)
+        output_track(inputfile, outputfile, i, t.tracks[i])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="Split flac files into multiple mp3 files")
     parser.add_argument('--version', action='version', version=version)
     parser.add_argument(
-        "-o", "--output-dir", action="store", type=str,
+        "-o", "--output-dir", action="store", type=pathlib.Path,
         dest="outputdir", help="Output directory, default '.'",
-        default='.')
+        default=pathlib.Path.cwd())
     parser.add_argument(
         "-v", "--verbose", action="store_true", dest="verbose",
         help="Show track lists and progress details",
@@ -297,9 +297,9 @@ if __name__ == '__main__':
     else:
         filenames = args.filenames
 
-    filenames = [ x for x in filenames if x ]
+    files = [ pathlib.Path(x) for x in filenames if x ]
 
-    if len(filenames) < 1:
+    if len(files) < 1:
         parser.error("please supply at least one input filename")
 
     if args.tracks is None:
@@ -318,8 +318,15 @@ if __name__ == '__main__':
         except:
             parser.error("invalid track list supplied")
 
-    for i in filenames:
-        process_file(i, tracks)
+    inputbase = os.path.commonpath(files)
+    inputbase = pathlib.Path(inputbase) if inputbase else None
+
+    if not args.outputdir.is_dir():
+        print("Output location '%s' is not a directory" % args.outputdir)
+        sys.exit(1)
+
+    for i in files:
+        process_file(i, tracks, inputbase)
 
     if len(errorlog) > 0:
         print("Errors recorded in this run:")
