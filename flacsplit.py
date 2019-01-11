@@ -16,19 +16,13 @@ import re
 import sys
 import argparse
 import pathlib
-
-errorlog = []
-
-def report_error(message):
-    print(message)
-    errorlog.append(message)
-    if not args.cont:
-        print("Aborting (to continue on errors use the '-c' option)")
-        sys.exit(1)
+import itertools
+import multiprocessing
+import signal
 
 class flactags:
-    def __init__(self, filename):
-        mf = subprocess.Popen(["metaflac", "--export-tags-to=-", str(filename)],
+    def __init__(self, path):
+        mf = subprocess.Popen(["metaflac", "--export-tags-to=-", str(path)],
                               stdout=subprocess.PIPE, encoding="utf-8")
         tags, xxx = mf.communicate()
         if mf.returncode != 0:
@@ -73,8 +67,8 @@ class cuesheet:
     will treat this as a single-track file.
 
     """
-    def __init__(self, filename):
-        mf = subprocess.Popen(["metaflac","--export-cuesheet-to=-", str(filename)],
+    def __init__(self, path):
+        mf = subprocess.Popen(["metaflac","--export-cuesheet-to=-", str(path)],
                               stdout=subprocess.PIPE, encoding="utf-8")
         cues, xxx = mf.communicate()
         if mf.returncode != 0:
@@ -98,132 +92,123 @@ class cuesheet:
         self.tracks = tracks
         self.lasttrack = tracknum
 
-def output_track(filename, destfile, tracknum, tags):
-    fields = [('TITLE', '--tt'),
-              ('ARTIST', '--ta'),
-              ('ALBUM', '--tl'),
-              ('DATE', '--ty'),
-              ('TRACKNUMBER', '--tn'),
-    ]
-    id3opts = []
-    for name, opt in fields:
-        if name in tags:
-            id3opts = id3opts + [opt, tags[name]]
-        
-    flac = subprocess.Popen(
-        ["flac", "--decode",
-         "--totally-silent",
-         "--cue=%d.1-%d.1" % (tracknum, tracknum + 1),
-         "--output-name=-", str(filename)],
-        stdout=subprocess.PIPE)
-    lame = subprocess.Popen(
-        ["lame", "--preset", args.lamepreset, "--silent"] + id3opts + [
-            "-", str(destfile)],
-        stdin=flac.stdout)
-    try:
-        lame.communicate()
-    except KeyboardInterrupt:
-        try:
-            print("Removing incomplete file '%s'" % destfile)
-            os.remove(destfile)
-        except:
-            pass
-        raise
-    flac.wait()
-    lame.wait()
-    if flac.returncode != 0 or lame.returncode != 0:
-        try:
-            os.remove(destfile)
-        except:
-            pass
-        report_error("Error writing %s: flac returncode %d, "+
-                     "lame returncode %d" % (destfile, flac.returncode,
-                                             lame.returncode))
-
 def fatsafe(name):
     invalid_fat_characters = ['?', ':', '|', '"']
     for i in invalid_fat_characters:
         name = name.replace(i, '')
     return name
 
-def process_file(inputfile, tracks, inputbase):
-    if inputfile.suffix != '.flac':
-        report_error("input file '%s' is not a .flac file" % inputfile)
-        return
-    try:
-        input_mtime = inputfile.stat().st_mtime
-    except:
-        report_error("could not stat input file '%s'" % inputfile)
-        return
+class flacfile:
+    def __init__(self, file_with_info):
+        path, inputbase, args = file_with_info
+        self.path = path
+        self.args = args
 
-    c = cuesheet(inputfile)
-    t = flactags(inputfile)
-    if t.tracks is None:
-        report_error("tags could not be read from file '%s'" % inputfile)
-        return
+        self.cuesheet = cuesheet(path)
+        self.tags = flactags(path)
+        self.jobs = []
 
-    if tracks is None:
-        tracks = range(1, c.lasttrack + 1)
+        if args.verbose:
+            print("%s: %d tracks in file." % (path, self.cuesheet.lasttrack))
 
-    # Single-track files do not need tags, because we name the output file
-    # after the input file rather than the track title
-    if c.lasttrack > 1:
-        # Check that tracks are present and have tags
-        badtracks = []
-        for x in tracks:
-            if x not in c.tracks:
-                badtracks.append(x)
-                report_error("track %d not present in file '%s'"%(x, inputfile))
-            if x not in t.tracks:
-                badtracks.append(x)
-                report_error("track %d has no tags in file '%s'"%(x, inputfile))
-            else:
-                if not checktags(t.tracks[x]):
-                    badtracks.append(x)
-                    report_error("track %d is missing required tags "
-                                 "in file '%s'" % (x, inputfile))
-        tracks = [x for x in tracks if x not in badtracks]
-
-    if args.verbose:
-        print("%s: %d tracks in file." % (inputfile, c.lasttrack))
-        for i in tracks:
-            print("%02d: %s by %s" % (
-                i,t.tracks[i]['TITLE'], t.tracks[i]['ARTIST']))
-    for i in tracks:
         outdir = args.outputdir
         if args.keepdirs:
-            relative = inputfile.relative_to(inputbase) if inputbase \
-                       else inputfile
-            outdir = outdir.joinpath(relative.parent)
-        if args.subdir and c.lasttrack != 1:
-            outdir = outdir / inputfile.stem
-        if args.fatsafe:
-            outdir = fatsafe(outdir)
-        if args.verbose:
-            print("Working on %s track %d..." % (inputfile, i))
-        if args.keepdirs or args.subdir:
-            outdir.mkdir(parents=True, exist_ok=True)
-        if c.lasttrack != 1:
-            outfilename = "%02d %s (%s).mp3" % (
-                i, t.tracks[i]['TITLE'], t.tracks[i]['ARTIST'])
-        else:
-            outfilename = inputfile.stem + ".mp3"
-        outfilename = outfilename.replace(os.sep, '')
-        if args.fatsafe:
-            outfilename = fatsafe(outfilename)
-        outputfile = outdir / outfilename
-        try:
-            output_mtime = outputfile.stat().st_mtime
-        except:
-            output_mtime = 0
-        if args.update:
-            if output_mtime > input_mtime:
-                if args.verbose:
-                    print("  - skipping %s because it is newer" % outputfile)
+            relative = path.relative_to(inputbase) if inputbase \
+                       else path
+            # If the fatsafe flag is specified, every component that we add
+            # to the output path must be fatsafe
+            if args.fatsafe:
+                for part in relative.parent.parts:
+                    outdir = outdir / fatsafe(part)
+            else:
+                outdir = outdir.joinpath(relative.parent)
+        if args.subdir:
+            if args.fatsafe:
+                outdir = outdir / fatsafe(path.stem)
+            else:
+                outdir = outdir / path.stem
+
+        self.badtracks = []
+        for track in range(1, self.cuesheet.lasttrack + 1):
+            if track not in self.cuesheet.tracks:
+                self.badtracks.append(
+                    "track %d not present" % track)
                 continue
-        if args.verbose:
-            print("  - writing to %s" % outputfile)
-        output_track(inputfile, outputfile, i, t.tracks[i])
+            if track not in self.tags.tracks:
+                self.badtracks.append("track %d has no tags" % track)
+                continue
+            if not checktags(self.tags.tracks[track]):
+                self.badtracks.append("track %d is missing required tags" % track)
+                continue
+            if args.verbose:
+                print("%02d: %s by %s" % (
+                    track, self.tags.tracks[track]['TITLE'],
+                    self.tags.tracks[track]['ARTIST']))
+            outfilename = "%02d %s (%s).mp3" % (
+                track,
+                self.tags.tracks[track]['TITLE'],
+                self.tags.tracks[track]['ARTIST'])
+            outfilename = outfilename.replace(os.sep, '')
+            if args.fatsafe:
+                outfilename = fatsafe(outfilename)
+            outputfile = outdir / outfilename
+            try:
+                output_mtime = outputfile.stat().st_mtime
+            except:
+                output_mtime = 0
+            if args.update:
+                if output_mtime > input_mtime:
+                    if args.verbose:
+                        print("  - skipping %s because it is newer" % outputfile)
+                continue
+            self.jobs.append((self, track, outputfile))
+
+    @staticmethod
+    def process_job(jobinfo):
+        self, tracknum, outputfile = jobinfo
+        # Make sure the output directory exists
+        outputfile.parent.mkdir(parents=True, exist_ok=True)
+        tags = self.tags.tracks[tracknum]
+        fields = [('TITLE', '--tt'),
+                  ('ARTIST', '--ta'),
+                  ('ALBUM', '--tl'),
+                  ('DATE', '--ty'),
+                  ('TRACKNUMBER', '--tn'),
+        ]
+        id3opts = []
+        for name, opt in fields:
+            if name in tags:
+                id3opts = id3opts + [opt, tags[name]]
+        
+        flac = subprocess.Popen(
+            ["flac", "--decode",
+             "--totally-silent",
+             "--cue=%d.1-%d.1" % (tracknum, tracknum + 1),
+             "--output-name=-", str(self.path)],
+            stdout=subprocess.PIPE)
+        lame = subprocess.Popen(
+            ["lame", "--preset", args.lamepreset, "--silent"] + id3opts + [
+                "-", str(outputfile)],
+            stdin=flac.stdout)
+        try:
+            lame.communicate()
+        except KeyboardInterrupt:
+            try:
+                ouputfile.unlink()
+            except:
+                pass
+            return "Aborted"
+        flac.wait()
+        lame.wait()
+        if flac.returncode != 0 or lame.returncode != 0:
+            try:
+                outputfile.unlink()
+            except:
+                pass
+            return ("Error writing %s: flac returncode %d, "
+                    "lame returncode %d" % (outputfile, flac.returncode,
+                                            lame.returncode))
+        return "%s track %d -> %s" % (self.path, tracknum, outputfile)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -264,10 +249,8 @@ if __name__ == '__main__':
         dest="lamepreset", default="extreme",
         help="Preset to pass to lame, default 'extreme'")
     parser.add_argument(
-        "-t", "--tracks", action="store", type=str,
-        dest="tracks",
-        help="List of tracks to work on, default all; example "+
-        "'1-3,5,7-10'", default=None)
+        "-j", "--jobs", action="store", type=int, default=os.cpu_count(),
+        help="Number of tracks to work on in parallel")
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument(
         "-x", "--from-stdin", action="store_true", dest="fromstdin",
@@ -302,22 +285,6 @@ if __name__ == '__main__':
     if len(files) < 1:
         parser.error("please supply at least one input filename")
 
-    if args.tracks is None:
-        tracks = None
-    else:
-        try:
-            tracks = []
-            for tr in args.tracks.split(','):
-                r = tr.split('-')
-                if len(r) == 1:
-                    tracks.append(int(r[0]))
-                elif len(r) == 2:
-                    tracks += list(range(int(r[0]), int(r[1]) + 1))
-                else:
-                    raise
-        except:
-            parser.error("invalid track list supplied")
-
     inputbase = os.path.commonpath(files)
     inputbase = pathlib.Path(inputbase) if inputbase else None
 
@@ -325,10 +292,31 @@ if __name__ == '__main__':
         print("Output location '%s' is not a directory" % args.outputdir)
         sys.exit(1)
 
-    for i in files:
-        process_file(i, tracks, inputbase)
+    def pool_init():
+        """Ignore SIGINT in worker processes
+        """
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    if len(errorlog) > 0:
-        print("Errors recorded in this run:")
-        for i in errorlog:
-            print(i)
+    pool = multiprocessing.Pool(args.jobs, initializer=pool_init)
+
+    files_with_info = ((f, inputbase, args) for f in files)
+    flacs = list(pool.imap_unordered(flacfile, files_with_info))
+    jobs = itertools.chain.from_iterable((f.jobs for f in flacs))
+    statuses = pool.imap_unordered(flacfile.process_job, jobs)
+
+    try:
+        for s in statuses:
+            print(s)
+
+        for f in flacs:
+            if f.badtracks:
+                print("%s problems:" % f.path)
+                for t in f.badtracks:
+                    print("  %s" % t)
+
+    except KeyboardInterrupt:
+        print("Exiting - output files may be incomplete")
+        pool.terminate()
+
+    pool.close()
+    pool.join()
