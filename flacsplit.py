@@ -168,6 +168,7 @@ class flacfile:
         self, tracknum, outputfile = jobinfo
         # Make sure the output directory exists
         outputfile.parent.mkdir(parents=True, exist_ok=True)
+        outputtmpfile = outputfile.with_suffix(".tmp")
         tags = self.tags.tracks[tracknum]
         fields = [('TITLE', '--tt'),
                   ('ARTIST', '--ta'),
@@ -188,29 +189,30 @@ class flacfile:
             stdout=subprocess.PIPE)
         lame = subprocess.Popen(
             ["lame", "--preset", args.lamepreset, "--silent"] + id3opts + [
-                "-", str(outputfile)],
+                "-", str(outputtmpfile)],
             stdin=flac.stdout)
-        try:
-            lame.communicate()
-        except KeyboardInterrupt:
-            try:
-                ouputfile.unlink()
-            except:
-                pass
-            return "Aborted"
+        lame.communicate()
         flac.wait()
         lame.wait()
         if flac.returncode != 0 or lame.returncode != 0:
             try:
-                outputfile.unlink()
+                outputtmpfile.unlink()
             except:
                 pass
             return ("Error writing %s: flac returncode %d, "
                     "lame returncode %d" % (outputfile, flac.returncode,
                                             lame.returncode))
+        try:
+            outputtmpfile.rename(outputfile)
+        except:
+            return ("Error renaming tmp file %s to %s" %(
+                outputtmpfile, outputfile))
         return "%s track %d -> %s" % (self.path, tracknum, outputfile)
 
 if __name__ == '__main__':
+    if sys.version_info < (3, 6):
+        print("{} requires python 3.6 or later".format(sys.argv[0]), file=sys.stderr)
+        sys.exit(1)
     parser = argparse.ArgumentParser(
         description="Split flac files into multiple mp3 files")
     parser.add_argument('--version', action='version', version=version)
