@@ -160,13 +160,21 @@ class flacfile:
                 print("%02d: %s by %s" % (
                     track, self.tags.tracks[track]['TITLE'],
                     self.tags.tracks[track]['ARTIST']))
-            outfilename = "%02d %s (%s).mp3" % (
+            outfilename = "%02d %s (%s)" % (
                 track,
                 self.tags.tracks[track]['TITLE'],
                 self.tags.tracks[track]['ARTIST'])
             outfilename = outfilename.replace(os.sep, '')
             if args.fatsafe:
                 outfilename = fatsafe(outfilename)
+            if args.max_filename_length:
+                # This is somewhat clunky, but hopefully won't come up
+                # too often!  The limit on filename length is on the
+                # number of bytes the filename encodes to, but we can
+                # only remove a whole number of characters
+                while len(outfilename.encode('utf-8')) > args.max_filename_length:
+                    outfilename = outfilename[:-1]
+            outfilename = outfilename + ".mp3"
             outputfile = outdir / outfilename
             try:
                 output_mtime = outputfile.stat().st_mtime
@@ -266,6 +274,10 @@ if __name__ == '__main__':
         "-f", "--fat-safe", action="store_true", dest="fatsafe",
         help="Remove characters from output pathnames that "
         "are not safe for FAT filesystems", default=False)
+    parser.add_argument(
+        "-t", "--truncate-filenames", action="store", type=int,
+        dest="max_filename_length", default=None,
+        help="Truncate output filenames (excluding extension) to this length in bytes")
     parser.add_argument(
         "-n", "--skip-newer", action="store_true", dest="update",
         help="Do not overwrite an output file if it is "
