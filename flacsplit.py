@@ -73,7 +73,7 @@ class cuesheet:
         cues, xxx = mf.communicate()
         if mf.returncode != 0:
             if args.verbose:
-                print("no cuesheet in '%s'; assuming single track" % filename)
+                print("no cuesheet in '%s'; assuming single track" % path)
             self.tracks = {1: None}
             self.lasttrack = 1
             return
@@ -92,6 +92,21 @@ class cuesheet:
         self.tracks = tracks
         self.lasttrack = tracknum
 
+class picture:
+    """flac files may contain one or more embedded pictures
+    """
+    def __init__(self, path):
+        mf = subprocess.Popen(["metaflac","--export-picture-to=-", str(path)],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        picture, xxx = mf.communicate()
+        if mf.returncode != 0:
+            if args.verbose:
+                print("no picture in '%s'" % path)
+            self.data = None
+            return
+        assert isinstance(picture, bytes)
+        self.data = picture
+
 def fatsafe(name):
     invalid_fat_characters = ['?', ':', '|', '"']
     for i in invalid_fat_characters:
@@ -106,6 +121,7 @@ class flacfile:
 
         self.cuesheet = cuesheet(path)
         self.tags = flactags(path)
+        self.picture = picture(path)
         self.jobs = []
 
         if args.verbose:
@@ -157,10 +173,11 @@ class flacfile:
             except:
                 output_mtime = 0
             if args.update:
+                input_mtime = self.path.stat().st_mtime
                 if output_mtime > input_mtime:
                     if args.verbose:
                         print("  - skipping %s because it is newer" % outputfile)
-                continue
+                    continue
             self.jobs.append((self, track, outputfile))
 
     @staticmethod
@@ -169,6 +186,7 @@ class flacfile:
         # Make sure the output directory exists
         outputfile.parent.mkdir(parents=True, exist_ok=True)
         outputtmpfile = outputfile.with_suffix(".tmp")
+        pictmpfile = None
         tags = self.tags.tracks[tracknum]
         fields = [('TITLE', '--tt'),
                   ('ARTIST', '--ta'),
@@ -179,8 +197,16 @@ class flacfile:
         id3opts = []
         for name, opt in fields:
             if name in tags:
-                id3opts = id3opts + [opt, tags[name]]
-        
+                id3opts.append(opt)
+                id3opts.append(tags[name])
+        # Add album art if present
+        if self.picture.data:
+            pictmpfile = outputfile.with_suffix(".tmppic")
+            with open(pictmpfile, 'wb') as f:
+                f.write(self.picture.data)
+            id3opts.append('--ti')
+            id3opts.append(str(pictmpfile))
+
         flac = subprocess.Popen(
             ["flac", "--decode",
              "--totally-silent",
@@ -194,6 +220,8 @@ class flacfile:
         lame.communicate()
         flac.wait()
         lame.wait()
+        if pictmpfile:
+            pictmpfile.unlink()
         if flac.returncode != 0 or lame.returncode != 0:
             try:
                 outputtmpfile.unlink()
@@ -294,12 +322,7 @@ if __name__ == '__main__':
         print("Output location '%s' is not a directory" % args.outputdir)
         sys.exit(1)
 
-    def pool_init():
-        """Ignore SIGINT in worker processes
-        """
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-    pool = multiprocessing.Pool(args.jobs, initializer=pool_init)
+    pool = multiprocessing.Pool(args.jobs)
 
     files_with_info = ((f, inputbase, args) for f in files)
     flacs = list(pool.imap_unordered(flacfile, files_with_info))
@@ -317,7 +340,8 @@ if __name__ == '__main__':
                     print("  %s" % t)
 
     except KeyboardInterrupt:
-        print("Exiting - output files may be incomplete")
+        # The workers might not get a chance to tidy up their temporary files
+        print("Exiting - output temporary files may be incomplete")
         pool.terminate()
 
     pool.close()
