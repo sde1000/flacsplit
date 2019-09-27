@@ -7,7 +7,7 @@
 files, optionally re-encoded as mp3.
 """
 
-version = "0.2"
+version = "0.3"
 
 import os
 import os.path
