@@ -64,6 +64,7 @@ run:
 ```
 find ~/Music/flac-archive -name "*.flac" -print0 | ./flacsplit.py \
   --verbose \
+  --keep-directory-structure \
   --subdir \
   --fat-safe \
   --truncate-filenames 240 \
