@@ -18,7 +18,6 @@ import argparse
 import pathlib
 import itertools
 import multiprocessing
-import signal
 
 class flactags:
     def __init__(self, path):
