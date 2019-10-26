@@ -174,18 +174,19 @@ class flacfile:
         outputfile.parent.mkdir(parents=True, exist_ok=True)
         outputtmpfile = outputfile.with_suffix(".tmp")
         pictmpfile = None
-        fields = [('TITLE', '--tt'),
-                  ('ARTIST', '--ta'),
-                  ('ALBUM', '--tl'),
-                  ('DATE', '--ty'),
-                  ('TRACKNUMBER', '--tn'),
+        fields = [('TITLE', '--tt', "{}"),
+                  ('ARTIST', '--ta', "{}"),
+                  ('ALBUM', '--tl', "{}"),
+                  ('DATE', '--ty', "{}"),
+                  ('TRACKNUMBER', '--tn', "{}"),
+                  ('ALBUMARTIST', '--tv', "TPE2={}"),
         ]
         id3opts = []
-        for name, opt in fields:
+        for name, opt, template in fields:
             tag = self.tags.get_tag(name, tracknum)
             if tag:
                 id3opts.append(opt)
-                id3opts.append(tag)
+                id3opts.append(template.format(tag))
         # Add album art if present
         if self.picture.data:
             pictmpfile = outputfile.with_suffix(".tmppic")
