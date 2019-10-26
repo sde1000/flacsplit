@@ -88,7 +88,7 @@ class picture:
         self.data = picture
 
 def fatsafe(name):
-    invalid_fat_characters = ['?', ':', '|', '"']
+    invalid_fat_characters = ['?', ':', '|', '"', '*']
     for i in invalid_fat_characters:
         name = name.replace(i, '')
     return name
