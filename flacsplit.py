@@ -21,43 +21,24 @@ import multiprocessing
 
 class flactags:
     def __init__(self, path):
+        self.tags = {}
         mf = subprocess.Popen(["metaflac", "--export-tags-to=-", str(path)],
                               stdout=subprocess.PIPE, encoding="utf-8")
         tags, xxx = mf.communicate()
         if mf.returncode != 0:
-            self.tracks = None
             return
         taglines = [x.strip() for x in tags.split("\n")]
-        defaults = {} # Tags with no track number specified
-        tracks = {}
         for x in taglines:
             s = x.split('=', 1)
             if len(s) != 2:
                 continue
             tag, value = s
-            m = re.search(r'(.*)\[(\d+)\]', tag)
-            if m is None:
-                defaults[tag] = value
-            else:
-                tagname = m.groups()[0]
-                tracknumber = int(m.groups()[1])
-                if tracknumber not in tracks:
-                    tracks[tracknumber] = defaults.copy()
-                tracks[tracknumber][tagname] = value
-        # Deal with single-track files
-        if tracks == {}:
-            tracks[1] = defaults
-        self.tracks = tracks
+            self.tags[tag] = value
 
-def checktags(tags):
-    """Check that at least ARTIST and TITLE tags are present.
-
-    """
-    if 'ARTIST' not in tags:
-        return False
-    if 'TITLE' not in tags:
-        return False
-    return True
+    def get_tag(self, tag, track):
+        track_value = self.tags.get(f"{tag}[{track}]")
+        default_value = self.tags.get(tag)
+        return track_value or default_value
 
 class cuesheet:
     """The cuesheet will tell us how many tracks are present.  We
@@ -149,20 +130,19 @@ class flacfile:
                 self.badtracks.append(
                     "track %d not present" % track)
                 continue
-            if track not in self.tags.tracks:
-                self.badtracks.append("track %d has no tags" % track)
+            title = self.tags.get_tag('TITLE', track)
+            artist = self.tags.get_tag('ARTIST', track)
+            if not title:
+                self.badtracks.append("track %d is missing TITLE tag" % track)
                 continue
-            if not checktags(self.tags.tracks[track]):
-                self.badtracks.append("track %d is missing required tags" % track)
+            if not artist:
+                self.badtracks.append("track %d is missing ARTIST tag" % track)
                 continue
             if args.verbose:
                 print("%02d: %s by %s" % (
-                    track, self.tags.tracks[track]['TITLE'],
-                    self.tags.tracks[track]['ARTIST']))
+                    track, title, artist))
             outfilename = "%02d %s (%s)" % (
-                track,
-                self.tags.tracks[track]['TITLE'],
-                self.tags.tracks[track]['ARTIST'])
+                track, title, artist)
             outfilename = outfilename.replace(os.sep, '')
             if args.fatsafe:
                 outfilename = fatsafe(outfilename)
@@ -194,7 +174,6 @@ class flacfile:
         outputfile.parent.mkdir(parents=True, exist_ok=True)
         outputtmpfile = outputfile.with_suffix(".tmp")
         pictmpfile = None
-        tags = self.tags.tracks[tracknum]
         fields = [('TITLE', '--tt'),
                   ('ARTIST', '--ta'),
                   ('ALBUM', '--tl'),
@@ -203,9 +182,10 @@ class flacfile:
         ]
         id3opts = []
         for name, opt in fields:
-            if name in tags:
+            tag = self.tags.get_tag(name, tracknum)
+            if tag:
                 id3opts.append(opt)
-                id3opts.append(tags[name])
+                id3opts.append(tag)
         # Add album art if present
         if self.picture.data:
             pictmpfile = outputfile.with_suffix(".tmppic")
