@@ -14,7 +14,7 @@ MP3 encoder.
 Copying
 -------
 
-flacsplit is Copyright (C) 2009–2019 Stephen Early <steve@assorted.org.uk>
+flacsplit is Copyright (C) 2009–2025 Stephen Early <steve@assorted.org.uk>
 
 It is distributed under the terms of the GNU General Public License
 as published by the Free Software Foundation, either version 3

@@ -7,7 +7,7 @@
 files, optionally re-encoded as mp3.
 """
 
-version = "0.3"
+version = "0.4"
 
 import os
 import os.path
@@ -36,9 +36,10 @@ class flactags:
             self.tags[tag] = value
 
     def get_tag(self, tag, track):
-        track_value = self.tags.get(f"{tag}[{track}]")
+        track_value_a = self.tags.get(f"{tag}[{track}]")
+        track_value_b = self.tags.get(f"TRACK_{track:02}_{tag}")
         default_value = self.tags.get(tag)
-        return track_value or default_value
+        return track_value_a or track_value_b or default_value
 
 class cuesheet:
     """The cuesheet will tell us how many tracks are present.  We
