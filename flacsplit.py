@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
 
-# Requires python 3.6 for the "encoding" parameter for Popen and for
-# os.path.commonpath to accept a sequence of path-like objects
-
 """Split a flac file with cuesheet and embedded tags into multiple
 files, optionally re-encoded as mp3.
 """
 
-version = "0.4"
-
+from typing import Optional, NamedTuple
 import os
 import os.path
 import subprocess
 import re
 import sys
 import argparse
-import pathlib
+from pathlib import Path
 import itertools
 import multiprocessing
 
+version = "0.5"
+
+
+class FileWithInfo(NamedTuple):
+    file: Path
+    inputbase: Optional[Path]
+    args: argparse.Namespace
+
+
+class JobInfo(NamedTuple):
+    flacfile: flacfile
+    tracknum: int
+    outputfile: Path
+
+
 class flactags:
-    def __init__(self, path):
+    def __init__(self, path: Path) -> None:
         self.tags = {}
         mf = subprocess.Popen(["metaflac", "--export-tags-to=-", str(path)],
                               stdout=subprocess.PIPE, encoding="utf-8")
@@ -35,11 +46,12 @@ class flactags:
             tag, value = s
             self.tags[tag] = value
 
-    def get_tag(self, tag, track):
+    def get_tag(self, tag: str, track: int) -> Optional[str]:
         track_value_a = self.tags.get(f"{tag}[{track}]")
         track_value_b = self.tags.get(f"TRACK_{track:02}_{tag}")
         default_value = self.tags.get(tag)
         return track_value_a or track_value_b or default_value
+
 
 class cuesheet:
     """The cuesheet will tell us how many tracks are present.  We
@@ -48,54 +60,59 @@ class cuesheet:
     will treat this as a single-track file.
 
     """
-    def __init__(self, path):
-        mf = subprocess.Popen(["metaflac","--export-cuesheet-to=-", str(path)],
-                              stdout=subprocess.PIPE, encoding="utf-8")
+    def __init__(self, path: Path):
+        self.tracks: dict[int, Optional[str]] = {}
+        self.lasttrack = 1
+        mf = subprocess.Popen(
+            ["metaflac", "--export-cuesheet-to=-", str(path)],
+            stdout=subprocess.PIPE, encoding="utf-8")
         cues, xxx = mf.communicate()
         if mf.returncode != 0:
-            if args.verbose:
-                print("no cuesheet in '%s'; assuming single track" % path)
+            # if args.verbose:
+            #     print("no cuesheet in '%s'; assuming single track" % path)
             self.tracks = {1: None}
             self.lasttrack = 1
             return
         cuelines = [x.strip() for x in cues.split("\n")]
-        tracks = {}
-        tracknum = None
+        tracknum = 0
         for x in cuelines:
             m = re.search(r'TRACK (\d\d) AUDIO', x)
-            if m != None:
+            if m is not None:
                 tracknum = int(m.groups()[0])
-                tracks[tracknum] = None
+                self.tracks[tracknum] = None
                 continue
             m = re.search(r'ISRC (.*)', x)
-            if m != None:
-                tracks[tracknum] = m.groups()[0]
-        self.tracks = tracks
+            if m is not None and tracknum is not None:
+                self.tracks[tracknum] = m.groups()[0]
         self.lasttrack = tracknum
+
 
 class picture:
     """flac files may contain one or more embedded pictures
     """
-    def __init__(self, path):
-        mf = subprocess.Popen(["metaflac","--export-picture-to=-", str(path)],
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    def __init__(self, path: Path) -> None:
+        mf = subprocess.Popen(
+            ["metaflac", "--export-picture-to=-", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         picture, xxx = mf.communicate()
         if mf.returncode != 0:
-            if args.verbose:
-                print("no picture in '%s'" % path)
+            # if args.verbose:
+            #     print("no picture in '%s'" % path)
             self.data = None
             return
         assert isinstance(picture, bytes)
         self.data = picture
 
-def fatsafe(name):
+
+def fatsafe(name: str) -> str:
     invalid_fat_characters = ['?', ':', '|', '"', '*']
     for i in invalid_fat_characters:
         name = name.replace(i, '')
     return name
 
+
 class flacfile:
-    def __init__(self, file_with_info):
+    def __init__(self, file_with_info: FileWithInfo) -> None:
         path, inputbase, args = file_with_info
         self.path = path
         self.args = args
@@ -103,10 +120,10 @@ class flacfile:
         self.cuesheet = cuesheet(path)
         self.tags = flactags(path)
         self.picture = picture(path)
-        self.jobs = []
+        self.jobs: list[JobInfo] = []
 
         if args.verbose:
-            print("%s: %d tracks in file." % (path, self.cuesheet.lasttrack))
+            print(f"{path}: {self.cuesheet.lasttrack} tracks in file.")
 
         outdir = args.outputdir
         if args.keepdirs:
@@ -152,35 +169,37 @@ class flacfile:
                 # too often!  The limit on filename length is on the
                 # number of bytes the filename encodes to, but we can
                 # only remove a whole number of characters
-                while len(outfilename.encode('utf-8')) > args.max_filename_length:
+                while len(outfilename.encode('utf-8')) \
+                      > args.max_filename_length:
                     outfilename = outfilename[:-1]
             outfilename = outfilename + ".mp3"
             outputfile = outdir / outfilename
             try:
                 output_mtime = outputfile.stat().st_mtime
-            except:
+            except Exception:
                 output_mtime = 0
             if args.update:
                 input_mtime = self.path.stat().st_mtime
                 if output_mtime > input_mtime:
                     if args.verbose:
-                        print("  - skipping %s because it is newer" % outputfile)
+                        print(f"  - skipping {outputfile} because it is newer")
                     continue
-            self.jobs.append((self, track, outputfile))
+            self.jobs.append(JobInfo(self, track, outputfile))
 
     @staticmethod
-    def process_job(jobinfo):
+    def process_job(jobinfo: JobInfo) -> str:
         self, tracknum, outputfile = jobinfo
         # Make sure the output directory exists
         outputfile.parent.mkdir(parents=True, exist_ok=True)
         outputtmpfile = outputfile.with_suffix(".tmp")
         pictmpfile = None
-        fields = [('TITLE', '--tt', "{}"),
-                  ('ARTIST', '--ta', "{}"),
-                  ('ALBUM', '--tl', "{}"),
-                  ('DATE', '--ty', "{}"),
-                  ('TRACKNUMBER', '--tn', "{}"),
-                  ('ALBUMARTIST', '--tv', "TPE2={}"),
+        fields = [
+            ('TITLE', '--tt', "{}"),
+            ('ARTIST', '--ta', "{}"),
+            ('ALBUM', '--tl', "{}"),
+            ('DATE', '--ty', "{}"),
+            ('TRACKNUMBER', '--tn', "{}"),
+            ('ALBUMARTIST', '--tv', "TPE2={}"),
         ]
         id3opts = []
         for name, opt, template in fields:
@@ -203,8 +222,8 @@ class flacfile:
              "--output-name=-", str(self.path)],
             stdout=subprocess.PIPE)
         lame = subprocess.Popen(
-            ["lame", "--preset", args.lamepreset, "--silent"] + id3opts + [
-                "-", str(outputtmpfile)],
+            ["lame", "--preset", self.args.lamepreset, "--silent"]
+            + id3opts + ["-", str(outputtmpfile)],
             stdin=flac.stdout)
         lame.communicate()
         flac.wait()
@@ -214,29 +233,25 @@ class flacfile:
         if flac.returncode != 0 or lame.returncode != 0:
             try:
                 outputtmpfile.unlink()
-            except:
+            except Exception:
                 pass
-            return ("Error writing %s: flac returncode %d, "
-                    "lame returncode %d" % (outputfile, flac.returncode,
-                                            lame.returncode))
+            return (f"Error writing {outputfile}: flac returncode "
+                    f"{flac.returncode}, lame returncode {lame.returncode}")
         try:
             outputtmpfile.rename(outputfile)
-        except:
-            return ("Error renaming tmp file %s to %s" %(
-                outputtmpfile, outputfile))
-        return "%s track %d -> %s" % (self.path, tracknum, outputfile)
+        except Exception:
+            return (f"Error renaming tmp file {outputtmpfile} to {outputfile}")
+        return f"{self.path} track {tracknum} -> {outputfile}"
 
-if __name__ == '__main__':
-    if sys.version_info < (3, 6):
-        print("{} requires python 3.6 or later".format(sys.argv[0]), file=sys.stderr)
-        sys.exit(1)
+
+def run() -> None:
     parser = argparse.ArgumentParser(
         description="Split flac files into multiple mp3 files")
     parser.add_argument('--version', action='version', version=version)
     parser.add_argument(
-        "-o", "--output-dir", action="store", type=pathlib.Path,
+        "-o", "--output-dir", action="store", type=Path,
         dest="outputdir", help="Output directory, default '.'",
-        default=pathlib.Path.cwd())
+        default=Path.cwd())
     parser.add_argument(
         "-v", "--verbose", action="store_true", dest="verbose",
         help="Show track lists and progress details",
@@ -258,7 +273,8 @@ if __name__ == '__main__':
     parser.add_argument(
         "-t", "--truncate-filenames", action="store", type=int,
         dest="max_filename_length", default=None,
-        help="Truncate output filenames (excluding extension) to this length in bytes")
+        help="Truncate output filenames (excluding extension) to this "
+        "length in bytes")
     parser.add_argument(
         "-n", "--skip-newer", action="store_true", dest="update",
         help="Do not overwrite an output file if it is "
@@ -270,7 +286,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "-p", "--lame-preset", action="store", type=str,
         dest="lamepreset", default="extreme",
-        help="Preset to pass to lame, default 'extreme'")
+        help="Preset to pass to lame, default 'insane'")
     parser.add_argument(
         "-j", "--jobs", action="store", type=int, default=os.cpu_count(),
         help="Number of tracks to work on in parallel")
@@ -303,21 +319,21 @@ if __name__ == '__main__':
     else:
         filenames = args.filenames
 
-    files = [ pathlib.Path(x) for x in filenames if x ]
+    files = [Path(x) for x in filenames if x]
 
     if len(files) < 1:
         parser.error("please supply at least one input filename")
 
-    inputbase = os.path.commonpath(files)
-    inputbase = pathlib.Path(inputbase) if inputbase else None
+    inputbase_common = os.path.commonpath(files)
+    inputbase = Path(inputbase_common) if inputbase_common else None
 
     if not args.outputdir.is_dir():
-        print("Output location '%s' is not a directory" % args.outputdir)
+        print(f"Output location '{args.outputdir}' is not a directory")
         sys.exit(1)
 
     pool = multiprocessing.Pool(args.jobs)
 
-    files_with_info = ((f, inputbase, args) for f in files)
+    files_with_info = (FileWithInfo(f, inputbase, args) for f in files)
     flacs = list(pool.imap_unordered(flacfile, files_with_info))
     jobs = itertools.chain.from_iterable((f.jobs for f in flacs))
     statuses = pool.imap_unordered(flacfile.process_job, jobs)
@@ -339,3 +355,7 @@ if __name__ == '__main__':
 
     pool.close()
     pool.join()
+
+
+if __name__ == '__main__':
+    run()
