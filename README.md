@@ -5,10 +5,11 @@ Tool that uses `flac`, `metaflac` and `lame` to split single album
 [FLAC](https://xiph.org/flac/) files with embedded cue sheets into
 multiple mp3 files.
 
-See [flactag](http://flactag.sourceforge.net/) for tools to generate
-and maintain these flac files.
+See [flactag](http://flactag.sourceforge.net/) and
+[flackup](https://pypi.org/project/flackup/) for tools to generate and
+maintain these flac files.
 
-See [LAME](http://lame.sourceforge.net/) for more information on the
+See [LAME](http://lame.sourceforge.io/) for more information on the
 MP3 encoder.
 
 Copying
